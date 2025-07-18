@@ -65,6 +65,221 @@ exports.setApp = function ( app, client )
         res.status(200).json(ret);
     });
 
+// Add meal route
+app.post('/api/addmeal', async (req, res) => {
+    console.log('=== ADD MEAL ROUTE CALLED ===');
+    console.log('Full request body:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const { userId, mealName, mealType, foodItems, date } = req.body;
+        
+        console.log('Parsed fields:', { userId, mealName, mealType, foodItems, date });
+        
+        // Validation
+        if (!userId || !mealName || !foodItems || foodItems.length === 0) {
+            console.log('ADD MEAL ERROR: Missing required fields');
+            return res.status(400).json({ 
+                error: 'userId, mealName, and foodItems are required',
+                received: { userId, mealName, foodItems }
+            });
+        }
+
+        const db = client.db('COP4331Cards');
+        const meals = db.collection("Meals");
+        console.log('Database collection accessed successfully');
+        
+        // Calculate total nutrition for the meal
+        let totalNutrients = {
+            calories: 0,
+            protein: 0,
+            carbohydrates: 0,
+            fat: 0,
+            fiber: 0,
+            sugar: 0,
+            sodium: 0
+        };
+        
+        foodItems.forEach(item => {
+            if (item.nutrients) {
+                totalNutrients.calories += parseFloat(item.nutrients.calories) || 0;
+                totalNutrients.protein += parseFloat(item.nutrients.protein) || 0;
+                totalNutrients.carbohydrates += parseFloat(item.nutrients.carbohydrates) || 0;
+                totalNutrients.fat += parseFloat(item.nutrients.fat) || 0;
+                totalNutrients.fiber += parseFloat(item.nutrients.fiber) || 0;
+                totalNutrients.sugar += parseFloat(item.nutrients.sugar) || 0;
+                totalNutrients.sodium += parseFloat(item.nutrients.sodium) || 0;
+            }
+        });
+        
+        // Round to 1 decimal place
+        Object.keys(totalNutrients).forEach(key => {
+            totalNutrients[key] = totalNutrients[key].toFixed(1);
+        });
+        
+        const newMeal = {
+            userId: parseInt(userId),
+            mealName: mealName,
+            mealType: mealType || 'custom', // breakfast, lunch, dinner, snack, custom
+            foodItems: foodItems,
+            totalNutrients: totalNutrients,
+            dateCreated: date || new Date().toISOString().split('T')[0],
+            timestamp: new Date().toISOString()
+        };
+        
+        console.log('New meal to insert:', JSON.stringify(newMeal, null, 2));
+        
+        const result = await meals.insertOne(newMeal);
+        console.log('Meal added successfully:', result.insertedId);
+        
+        res.json({
+            success: true,
+            message: 'Meal has been created successfully',
+            mealId: result.insertedId,
+            meal: newMeal
+        });
+        
+    } catch (error) {
+        console.error('ADD MEAL ERROR:', error);
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ 
+            error: 'Failed to add meal',
+            details: error.message
+        });
+    }
+});
+
+// Get user's meals route
+app.post('/api/getmeals', async (req, res) => {
+    console.log('=== GET MEALS ROUTE CALLED ===');
+    const { userId, date } = req.body;
+    
+    console.log('Get meals request:', { userId, date });
+    
+    if (!userId) {
+        return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    try {
+        const db = client.db('COP4331Cards');
+        const meals = db.collection("Meals");
+        const query = { userId: parseInt(userId) };
+        
+        // If date is provided, filter by date
+        if (date) {
+            query.dateCreated = date;
+        }
+        
+        const userMeals = await meals.find(query).toArray();
+        console.log('Found', userMeals.length, 'meals for user', userId, 'on date', date);
+        
+        res.json({
+            success: true,
+            meals: userMeals
+        });
+    } catch (error) {
+        console.error('Get meals error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Add meal to daily log (use existing meal as template)
+app.post('/api/addmealtoday', async (req, res) => {
+    console.log('=== ADD MEAL TO TODAY ROUTE CALLED ===');
+    const { userId, mealId, date } = req.body;
+    
+    console.log('Add meal to today request:', { userId, mealId, date });
+    
+    if (!userId || !mealId) {
+        return res.status(400).json({ error: 'User ID and Meal ID are required' });
+    }
+
+    try {
+        const db = client.db('COP4331Cards');
+        const meals = db.collection("Meals");
+        const foodEntries = db.collection("FoodEntries");
+        const { ObjectId } = require('mongodb');
+        
+        // Get the meal
+        const meal = await meals.findOne({ 
+            _id: new ObjectId(mealId),
+            userId: parseInt(userId)
+        });
+        
+        if (!meal) {
+            return res.status(404).json({ error: 'Meal not found' });
+        }
+        
+        // Add each food item from the meal to today's food entries
+        const today = date || new Date().toISOString().split('T')[0];
+        const addedEntries = [];
+        
+        for (const foodItem of meal.foodItems) {
+            const newFoodEntry = {
+                userId: parseInt(userId),
+                fdcId: foodItem.fdcId,
+                foodName: foodItem.foodName,
+                brandOwner: foodItem.brandOwner || '',
+                servingSize: foodItem.servingSize,
+                servingSizeUnit: foodItem.servingSizeUnit || 'g',
+                nutrients: foodItem.nutrients,
+                dateAdded: today,
+                timestamp: new Date().toISOString(),
+                mealName: meal.mealName // Track which meal this came from
+            };
+            
+            const result = await foodEntries.insertOne(newFoodEntry);
+            addedEntries.push({...newFoodEntry, _id: result.insertedId});
+        }
+        
+        console.log('Added', addedEntries.length, 'food entries from meal', meal.mealName);
+        
+        res.json({
+            success: true,
+            message: `Added ${meal.mealName} to today's log`,
+            addedEntries: addedEntries
+        });
+        
+    } catch (error) {
+        console.error('Add meal to today error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Delete meal route
+app.post('/api/deletemeal', async (req, res) => {
+    console.log('=== DELETE MEAL ROUTE CALLED ===');
+    const { userId, mealId } = req.body;
+    
+    console.log('Delete meal request:', { userId, mealId });
+    
+    if (!mealId) {
+        return res.status(400).json({ error: 'Meal ID is required' });
+    }
+
+    try {
+        const db = client.db('COP4331Cards');
+        const { ObjectId } = require('mongodb');
+        const meals = db.collection("Meals");
+        const result = await meals.deleteOne({ 
+            _id: new ObjectId(mealId),
+            userId: parseInt(userId) // Also check userId for security
+        });
+        
+        if (result.deletedCount === 1) {
+            console.log('Meal deleted successfully:', mealId);
+            res.json({
+                success: true,
+                message: 'Meal deleted'
+            });
+        } else {
+            res.status(404).json({ error: 'Meal not found' });
+        }
+    } catch (error) {
+        console.error('Delete meal error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+  
     app.post('/api/login', async (req, res, next) =>
     {
         // incoming: userLogin, userPassword
